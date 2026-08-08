@@ -2,7 +2,7 @@
 
 A Node.js server that tracks a subject using a PTZ camera via the VISCA over IP protocol. It features a web GUI for drawing a tracking bounding box over an RTSP video stream and supports OSC commands for integration with other software (e.g. Max/MSP).
 
-This repo is the standalone server component only. For the macOS packaged app build and Max/MSP integration patch, see [PTZ-follow](https://github.com/cju-media/PTZ-follow), which embeds this repo as a submodule.
+This repo is the standalone server component only. For the macOS packaged app build and Max/MSP integration patch, see [PTZ-follow](https://github.com/cju-media/PTZ-Follow), which embeds this repo as a submodule.
 
 ## Features
 
