@@ -29,7 +29,6 @@
     ],
     "targets": [
       "node24-macos-arm64"
-    ],
-    "outputPath": "packaging/dist-node"
+    ]
   }
 }
