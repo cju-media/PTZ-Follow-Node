@@ -44,6 +44,7 @@ For clients that would rather poll with a plain HTTP GET than hold open an OSC o
 | :--- | :--- |
 | `GET /api/status` | Status for every configured camera, keyed by id: `{ "cameras": { "cam1": { ... }, ... } }` |
 | `GET /api/status/:id` | Status for a single camera id. Returns `404` if that id isn't configured. |
+| `GET /api/tracking` | Just tracking on/off per camera, as an array of `[id, trackingEnabled]` pairs: `[["cam1", true], ["cam2", false]]` - simpler than `/api/status` to turn into a Max list/array since there's no per-camera dict to unpack. |
 
 Each camera's status object looks like:
 

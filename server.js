@@ -925,6 +925,16 @@ app.get('/api/status/:id', (req, res) => {
     res.json(payload);
 });
 
+// Minimal companion to /api/status: just [id, trackingEnabled] pairs, e.g.
+// [["cam1", true], ["cam2", false]]. /api/status's per-camera objects are awkward to turn into a
+// Max list/array (each entry is a dict, needs dict.deserialize), whereas a plain array of
+// [id, boolean] pairs maps directly onto Max list/array handling with no dict step in between.
+app.get('/api/tracking', (req, res) => {
+    res.set('Access-Control-Allow-Origin', '*');
+    const pairs = Object.keys(state.cameras).map(id => [id, !!state.cameras[id].trackingEnabled]);
+    res.json(pairs);
+});
+
 app.listen(PORT, () => {
     console.log(`Server listening on port ${PORT}`);
     if (IS_PACKAGED) {
