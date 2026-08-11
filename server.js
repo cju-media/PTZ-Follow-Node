@@ -881,6 +881,50 @@ app.ws('/control', (ws, req) => {
     });
 });
 
+// Read-only HTTP status endpoint: lets external tools that can't easily speak OSC or WebSocket -
+// e.g. Max/MSP polling with a plain "GET" object/[jweb] request instead of an [udpreceive] - pull
+// each camera's current tracking state on demand. Mirrors the same fields already broadcast to
+// the web GUI over /control (see the 'state' messages above), just reachable synchronously via a
+// GET instead of requiring a persistent connection.
+function cameraStatusPayload(id) {
+    const cam = state.cameras[id];
+    if (!cam) return null;
+    return {
+        id,
+        ip: cam.ip || null,
+        trackingEnabled: !!cam.trackingEnabled,
+        movementPaused: !!cam.movementPaused,
+        hasRect: !!cam.rect, // whether a bounding box has ever been drawn - OSC /tracking needs this to start
+        trackerRunning: !!activeTrackers[id],
+        // Best-effort connection health: VISCA is UDP with no real handshake, so this is really
+        // "has this camera been ACKing pan/tilt commands lately", not a true connected/disconnected
+        // state. See sendPanTilt()/viscaMissedAckStreak above.
+        viscaOk: (viscaMissedAckStreak[id] || 0) < VISCA_RECONNECT_THRESHOLD
+    };
+}
+
+// CORS is wide open on these two routes (and only these) since it's read-only status info and
+// Max's [jweb] object is a Chromium webview that enforces CORS like any browser would, unlike a
+// plain [urlget]/[js] GET from Max itself.
+app.get('/api/status', (req, res) => {
+    res.set('Access-Control-Allow-Origin', '*');
+    const cameras = {};
+    Object.keys(state.cameras).forEach(id => {
+        cameras[id] = cameraStatusPayload(id);
+    });
+    res.json({ cameras });
+});
+
+app.get('/api/status/:id', (req, res) => {
+    res.set('Access-Control-Allow-Origin', '*');
+    const payload = cameraStatusPayload(req.params.id);
+    if (!payload) {
+        res.status(404).json({ error: `Unknown camera id: ${req.params.id}` });
+        return;
+    }
+    res.json(payload);
+});
+
 app.listen(PORT, () => {
     console.log(`Server listening on port ${PORT}`);
     if (IS_PACKAGED) {

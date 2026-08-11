@@ -36,6 +36,36 @@ The server listens for OSC messages on port **9357**.
 
 All commands broadcast the updated state to every connected web GUI client immediately, so changes made via OSC (or by another browser tab) show up live without needing a page refresh.
 
+## HTTP Status Endpoint
+
+For clients that would rather poll with a plain HTTP GET than hold open an OSC or WebSocket connection (e.g. Max/MSP's `jweb` object, or any other "GET" style request), the server also exposes read-only JSON status on the same port as the web GUI (**9356**):
+
+| Endpoint | Description |
+| :--- | :--- |
+| `GET /api/status` | Status for every configured camera, keyed by id: `{ "cameras": { "cam1": { ... }, ... } }` |
+| `GET /api/status/:id` | Status for a single camera id. Returns `404` if that id isn't configured. |
+
+Each camera's status object looks like:
+
+```json
+{
+  "id": "cam1",
+  "ip": "192.168.1.100",
+  "trackingEnabled": true,
+  "movementPaused": false,
+  "hasRect": true,
+  "trackerRunning": true,
+  "viscaOk": true
+}
+```
+
+- **trackingEnabled** / **movementPaused**: same meaning as the OSC commands above.
+- **hasRect**: whether a bounding box has ever been drawn for this camera - `/tracking 1` over OSC needs this to be true to actually start tracking.
+- **trackerRunning**: whether the background tracker process (RTSP + CSRT) is alive for this camera.
+- **viscaOk**: best-effort signal for whether the camera has been ACKing pan/tilt commands lately. VISCA-over-IP is UDP with no real handshake, so this reflects recent ACK history, not a live connection check.
+
+Both routes send `Access-Control-Allow-Origin: *`, so they're also fetchable from a Chromium-based webview (like Max's `jweb`) without a CORS error.
+
 ## Python OpenCV Requirement
 
 This project uses a python script for headless OpenCV object tracking.
