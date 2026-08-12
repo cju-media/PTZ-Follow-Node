@@ -33,6 +33,7 @@ The server listens for OSC messages on port **9357**.
 | `/tracking/pause` | `String` (id), `Integer` (1 or 0) | Pauses (1) or resumes (0) camera *movement* without disengaging object tracking - the bounding box keeps following the subject, but no VISCA pan/tilt commands are sent while paused. Requires the camera to already be configured. <br><br> *Example:* `/tracking/pause "cam1" 1` |
 | `/gui/open` | None | Opens the Web GUI (`http://localhost:9356`) in the default web browser of the machine running the server. |
 | `/camera/setup` | `String` (id), `String` (ip) | Configures a camera and persists it to disk. <br> - **id**: A unique string ID for the camera. <br> - **ip**: The VISCA IP address of the camera. <br> *(The RTSP stream URL is automatically constructed from the IP address)* <br><br> *Example:* `/camera/setup "cam1" "192.168.1.100"` |
+| `/shutdown` | None | Gracefully shuts down the server: stops every tracker process, notifies any open web GUI tabs, then exits. Same effect as the GUI's "Quit App" button. If a Max patch spawned this server (e.g. via `[shell]`), send this before Max itself quits so the server process doesn't get left running/force-quit as an orphan. <br><br> *Example:* `/shutdown` |
 
 All commands broadcast the updated state to every connected web GUI client immediately, so changes made via OSC (or by another browser tab) show up live without needing a page refresh.
 

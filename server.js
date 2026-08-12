@@ -1035,6 +1035,13 @@ oscServer.on('message', (msg) => {
     } else if (address === '/gui/open') {
         // See the .catch() on the startup open() call above for why this is needed.
         open(`http://localhost:${PORT}`).catch(err => console.error('Failed to auto-open the browser:', err));
+    } else if (address === '/shutdown') {
+        // OSC equivalent of the web GUI's "Quit App" button, for a Max patch (spawned this server
+        // via [shell]) to call from its own closebang/quit handling - so quitting Max stops every
+        // tracker process and exits this server cleanly instead of leaving it running as an
+        // orphan that has to be force-quit separately. See gracefulShutdown() for what "cleanly"
+        // covers (stopping trackers, notifying any open web GUI tabs) and its other triggers.
+        gracefulShutdown('OSC /shutdown');
     } else if (address === '/camera/setup') {
         if (args.length >= 2) {
             const id = args[0];
