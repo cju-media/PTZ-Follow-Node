@@ -33,6 +33,39 @@ except ImportError:
 MAX_JUMP_RATIO = 0.25
 LOST_GRACE_SECONDS = 1.5
 
+# Anti-overshoot tuning. server.js converts our 'pan'/'tilt' output almost directly into camera
+# speed (proportional control: bigger deviation from center -> faster move). That's fine in
+# isolation, but the RTSP frame we're computing deviation from is already stale by the time the
+# resulting VISCA command reaches the camera and the camera physically responds (network +
+# camera-side encode/buffer latency, often ~1s on top of our own read/CSRT-update time). By the
+# time a full-speed "go right" command actually lands, the subject may already be back near
+# center or moving the other way - so the camera keeps overshooting past the target and bouncing
+# back, a classic delay-induced oscillation in a pure proportional feedback loop.
+#
+# Fixed the same way a delayed control loop always is: brake in anticipation instead of reacting
+# only to present position. DERIVATIVE_GAIN adds a term proportional to how much the (smoothed)
+# deviation changed since the last frame to the outgoing pan/tilt value (a discrete-time PD
+# controller - deliberately *not* normalized by the time between frames, see below). While the
+# subject is approaching center, that change has the opposite sign from the deviation itself, so
+# it tapers the commanded speed off *before* the subject reaches center - and, if closing fast
+# enough, briefly commands the opposite direction to actively brake - rather than staying pinned
+# at full proportional speed until the last frame. Raise it if tracking still bounces; lower it
+# (toward 0) if it now feels sluggish to start moving or brakes too early/too hard.
+#
+# Deliberately using the raw per-frame delta rather than a true dt-normalized velocity: RTSP
+# frame delivery over Wi-Fi/network is jittery enough that dividing by a near-zero dt (two frames
+# arriving back-to-back) spikes the "velocity" wildly and saturates the output every time,
+# fighting the very thing this is meant to fix. The raw delta is far steadier in practice since
+# frame arrival is roughly periodic, and still shrinks/grows with actual subject speed.
+#
+# SMOOTHING_ALPHA (0-1, EMA weight on the newest sample) exists to keep that delta term sane:
+# frame-to-frame CSRT box jitter is small but not negligible, and DERIVATIVE_GAIN would otherwise
+# amplify that noise straight into jittery commands. Lower alpha = smoother/less jittery but adds
+# a bit more of its own lag; raise it toward 1 to disable smoothing (not recommended once
+# DERIVATIVE_GAIN > 0).
+DERIVATIVE_GAIN = 2.0
+SMOOTHING_ALPHA = 0.5
+
 # OpenCV's FFmpeg backend defaults to a ~30s internal timeout for both opening an RTSP stream
 # and for each individual read - so if the camera is unreachable (e.g. mid-reboot), cap.read()
 # can block for the full 30s before the reconnect loop below even gets a chance to try again.
@@ -124,6 +157,8 @@ def main():
     tracker = None
     last_good_bbox = None  # (x, y, w, h) of the last accepted match, for the jump-distance check
     lost_since = None      # wall-clock time we started failing to get a good match, or None
+    smoothed_dev = None    # EMA-filtered (devX, devY), for the derivative-braking calc below
+    last_dev = None        # smoothed_dev as of the previous frame, to compute the delta
 
     while tracker_state['running']:
         ret, frame = cap.read()
@@ -167,6 +202,11 @@ def main():
             # A fresh box is always trusted as-is, and resets the drift/loss tracking.
             last_good_bbox = bbox
             lost_since = None
+            # Also reset the smoothing/derivative history - it describes motion relative to the
+            # *previous* subject, so carrying it into a freshly (re)drawn box would just inject a
+            # bogus velocity spike into the first few commands.
+            smoothed_dev = None
+            last_dev = None
 
         if tracker is not None:
             ok, bbox = tracker.update(frame)
@@ -201,10 +241,38 @@ def main():
                 devX = (centerX - frameCenterX) / frameCenterX
                 devY = (centerY - frameCenterY) / frameCenterY
 
+                # Smooth first (see SMOOTHING_ALPHA comment above), then derive a braking term
+                # from how much the smoothed deviation changed since the last frame.
+                if smoothed_dev is None:
+                    smoothed_dev = (devX, devY)
+                else:
+                    smoothed_dev = (
+                        SMOOTHING_ALPHA * devX + (1 - SMOOTHING_ALPHA) * smoothed_dev[0],
+                        SMOOTHING_ALPHA * devY + (1 - SMOOTHING_ALPHA) * smoothed_dev[1],
+                    )
+
+                deltaX = deltaY = 0.0
+                if last_dev is not None:
+                    deltaX = smoothed_dev[0] - last_dev[0]
+                    deltaY = smoothed_dev[1] - last_dev[1]
+                last_dev = smoothed_dev
+
+                # Standard PD combination: add the delta term to the deviation. When the subject
+                # is approaching center, the delta has the opposite sign from the deviation, so
+                # this *reduces* the commanded magnitude (and, if closing fast enough, flips it
+                # negative - i.e. briefly commands the opposite direction to actively brake,
+                # rather than just coasting to zero speed exactly as it crosses center). When the
+                # subject is instead moving away from center, the delta has the same sign as the
+                # deviation, so this adds to the command, responding faster to a worsening error.
+                # Clamp back to devX/devY's natural [-1, 1] range afterward: server.js's speed
+                # conversion assumes that range, and this can otherwise push slightly outside it.
+                panOut = max(-1.0, min(1.0, smoothed_dev[0] + DERIVATIVE_GAIN * deltaX))
+                tiltOut = max(-1.0, min(1.0, smoothed_dev[1] + DERIVATIVE_GAIN * deltaY))
+
                 out_data = {
                     'type': 'tracking',
-                    'pan': devX,
-                    'tilt': -devY, # Note: original JS code used -devY
+                    'pan': panOut,
+                    'tilt': -tiltOut, # Note: original JS code used -devY
                     'rect': {
                         'x': float(x),
                         'y': float(y),
