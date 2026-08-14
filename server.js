@@ -146,6 +146,40 @@ function getCameraSpeedCaps(camId) {
     };
 }
 
+// Dead zone tuning: how close to dead-center (as a percentage of half the frame - the same
+// normalized units as tracker.py's pan/tilt deviation) counts as "close enough", below which no
+// VISCA move command is sent at all. Below this, a proportional/PD controller commands a tiny
+// but nonzero speed that mostly just re-triggers noise/latency-driven direction reversals right
+// as the subject crosses center - a classic contributor to bounce, on top of (not fixed by) the
+// speed cap and derivative damping in tracker.py. Widening the dead zone gives the subject more
+// room to be "close enough" before the camera reacts again, at the cost of a bit of precision in
+// how exactly centered it ends up.
+//
+// Tilt gets a larger default than pan: this project's camera (and PTZ heads generally) has a
+// narrower/slower tilt range than pan, so the same normalized deviation swings the tilt axis
+// through proportionally more of its travel and is more prone to bouncing - see the tuning
+// comment above MAX_PAN_SPEED/MAX_TILT_SPEED's replacement, HARDWARE_MAX_PAN_SPEED/
+// HARDWARE_MAX_TILT_SPEED (24 vs 20), for the same asymmetry showing up in speed.
+//
+// Stored per-camera (state.cameras[id].panDeadzonePercent/tiltDeadzonePercent), persisted in
+// config.json, and tunable live from the web GUI's "Pan/Tilt Dead Zone" sliders - same pattern
+// as maxSpeedPercent above.
+const DEFAULT_PAN_DEADZONE_PERCENT = 12;
+const DEFAULT_TILT_DEADZONE_PERCENT = 20;
+const MAX_DEADZONE_PERCENT = 50; // above this the camera would barely react to anything at all
+
+function getCameraDeadzones(camId) {
+    const cam = state.cameras[camId];
+    let panPercent = cam && Number.isFinite(cam.panDeadzonePercent) ? cam.panDeadzonePercent : DEFAULT_PAN_DEADZONE_PERCENT;
+    let tiltPercent = cam && Number.isFinite(cam.tiltDeadzonePercent) ? cam.tiltDeadzonePercent : DEFAULT_TILT_DEADZONE_PERCENT;
+    panPercent = Math.min(MAX_DEADZONE_PERCENT, Math.max(0, panPercent));
+    tiltPercent = Math.min(MAX_DEADZONE_PERCENT, Math.max(0, tiltPercent));
+    return {
+        panDeadzone: panPercent / 100,
+        tiltDeadzone: tiltPercent / 100
+    };
+}
+
 // Same class of problem as the dev-mode ffmpeg path above: a bare "python3" in getTrackerCommand()
 // below otherwise just does a PATH lookup, which is fine from an interactive Terminal shell but
 // not from a Max/MSP "shell" object, Finder, a LaunchAgent, etc. - those only inherit a bare
@@ -261,7 +295,7 @@ app.ws('/stream', (ws, req) => {
 
 // Store global state
 const state = {
-    cameras: {}, // Format: { id: { ip, rtsp, trackingEnabled: boolean, maxSpeedPercent: number } }
+    cameras: {}, // Format: { id: { ip, rtsp, trackingEnabled: boolean, maxSpeedPercent: number, panDeadzonePercent: number, tiltDeadzonePercent: number } }
     viscaDevices: {} // Format: { id: Visca Camera instance }
 };
 
@@ -323,13 +357,15 @@ function loadConfig() {
 
 function saveConfig() {
     try {
-        // Only save ip, rtsp, and maxSpeedPercent - don't persist tracking state
+        // Only save ip, rtsp, and the tuning settings below - don't persist tracking state
         const configToSave = {};
         Object.keys(state.cameras).forEach(id => {
             configToSave[id] = {
                 ip: state.cameras[id].ip,
                 rtsp: state.cameras[id].rtsp,
-                maxSpeedPercent: state.cameras[id].maxSpeedPercent
+                maxSpeedPercent: state.cameras[id].maxSpeedPercent,
+                panDeadzonePercent: state.cameras[id].panDeadzonePercent,
+                tiltDeadzonePercent: state.cameras[id].tiltDeadzonePercent
             };
         });
         fs.writeFileSync(configPath, JSON.stringify(configToSave, null, 2));
@@ -616,8 +652,9 @@ function ensureTrackerProcess(camId, rtsp) {
                     let pan = data.pan;
                     let tilt = data.tilt;
 
-                    if (Math.abs(pan) < 0.1) pan = 0;
-                    if (Math.abs(tilt) < 0.1) tilt = 0;
+                    const { panDeadzone, tiltDeadzone } = getCameraDeadzones(camId);
+                    if (Math.abs(pan) < panDeadzone) pan = 0;
+                    if (Math.abs(tilt) < tiltDeadzone) tilt = 0;
 
                     if (pan !== 0 || tilt !== 0) {
                         const { panMax, tiltMax } = getCameraSpeedCaps(camId);
@@ -798,11 +835,14 @@ app.ws('/control', (ws, req) => {
             if (data.type === 'setup') {
                 const trackingEnabled = state.cameras[data.camId] ? state.cameras[data.camId].trackingEnabled : false;
                 const movementPaused = state.cameras[data.camId] ? state.cameras[data.camId].movementPaused : false;
-                // Carry forward the existing max-speed setting - this path also handles editing
-                // an existing camera's IP, and losing its tuned speed back to the default every
-                // time would be a nasty surprise.
-                const maxSpeedPercent = state.cameras[data.camId] ? state.cameras[data.camId].maxSpeedPercent : DEFAULT_MAX_SPEED_PERCENT;
-                state.cameras[data.camId] = { ip: data.camIp, rtsp: data.camRtsp, trackingEnabled, movementPaused, maxSpeedPercent };
+                // Carry forward the existing tuning settings - this path also handles editing an
+                // existing camera's IP, and losing its tuned speed/dead zone back to the default
+                // every time would be a nasty surprise.
+                const existingCam = state.cameras[data.camId];
+                const maxSpeedPercent = existingCam ? existingCam.maxSpeedPercent : DEFAULT_MAX_SPEED_PERCENT;
+                const panDeadzonePercent = existingCam ? existingCam.panDeadzonePercent : DEFAULT_PAN_DEADZONE_PERCENT;
+                const tiltDeadzonePercent = existingCam ? existingCam.tiltDeadzonePercent : DEFAULT_TILT_DEADZONE_PERCENT;
+                state.cameras[data.camId] = { ip: data.camIp, rtsp: data.camRtsp, trackingEnabled, movementPaused, maxSpeedPercent, panDeadzonePercent, tiltDeadzonePercent };
                 console.log(`UI Setup updated for ID ${data.camId}: IP=${data.camIp}, RTSP=${data.camRtsp}`);
                 initVisca(data.camId, data.camIp);
                 ensureTrackerProcess(data.camId, data.camRtsp);
@@ -891,6 +931,35 @@ app.ws('/control', (ws, req) => {
                         }
                     });
                 }
+            } else if (data.type === 'set_deadzone') {
+                // Either axis is optional so each slider can be dragged independently without
+                // the other one's current value needing to be resent along with it.
+                if (state.cameras[data.camId]) {
+                    const cam = state.cameras[data.camId];
+                    if (data.panDeadzonePercent !== undefined) {
+                        let percent = Number(data.panDeadzonePercent);
+                        if (!Number.isFinite(percent)) percent = DEFAULT_PAN_DEADZONE_PERCENT;
+                        cam.panDeadzonePercent = Math.min(MAX_DEADZONE_PERCENT, Math.max(0, Math.round(percent)));
+                    }
+                    if (data.tiltDeadzonePercent !== undefined) {
+                        let percent = Number(data.tiltDeadzonePercent);
+                        if (!Number.isFinite(percent)) percent = DEFAULT_TILT_DEADZONE_PERCENT;
+                        cam.tiltDeadzonePercent = Math.min(MAX_DEADZONE_PERCENT, Math.max(0, Math.round(percent)));
+                    }
+                    console.log(`Dead zone set via UI for ${data.camId}: pan=${cam.panDeadzonePercent}% tilt=${cam.tiltDeadzonePercent}%`);
+                    saveConfig();
+
+                    // Broadcast state update so every open tab's sliders (and any other client
+                    // showing this camera) reflect the new value immediately.
+                    wsInstance.getWss().clients.forEach(client => {
+                        if (client.readyState === 1) {
+                            client.send(JSON.stringify({
+                                type: 'state',
+                                cameras: state.cameras
+                            }));
+                        }
+                    });
+                }
             } else if (data.type === 'remove_camera') {
                 if (state.cameras[data.camId]) {
                     console.log(`Removing camera ${data.camId}`);
@@ -941,6 +1010,8 @@ function cameraStatusPayload(id) {
         trackingEnabled: !!cam.trackingEnabled,
         movementPaused: !!cam.movementPaused,
         maxSpeedPercent: Number.isFinite(cam.maxSpeedPercent) ? cam.maxSpeedPercent : DEFAULT_MAX_SPEED_PERCENT,
+        panDeadzonePercent: Number.isFinite(cam.panDeadzonePercent) ? cam.panDeadzonePercent : DEFAULT_PAN_DEADZONE_PERCENT,
+        tiltDeadzonePercent: Number.isFinite(cam.tiltDeadzonePercent) ? cam.tiltDeadzonePercent : DEFAULT_TILT_DEADZONE_PERCENT,
         hasRect: !!cam.rect, // whether a bounding box has ever been drawn - OSC /tracking needs this to start
         trackerRunning: !!activeTrackers[id],
         // Best-effort connection health: VISCA is UDP with no real handshake, so this is really
@@ -1094,10 +1165,13 @@ oscServer.on('message', (msg) => {
             const id = args[0];
             const ip = args[1];
             const rtsp = `rtsp://${ip}:554/live/av0`;
-            const trackingEnabled = state.cameras[id] ? state.cameras[id].trackingEnabled : false;
-            const movementPaused = state.cameras[id] ? state.cameras[id].movementPaused : false;
-            const maxSpeedPercent = state.cameras[id] ? state.cameras[id].maxSpeedPercent : DEFAULT_MAX_SPEED_PERCENT;
-            state.cameras[id] = { ip, rtsp, trackingEnabled, movementPaused, maxSpeedPercent };
+            const existingCam = state.cameras[id];
+            const trackingEnabled = existingCam ? existingCam.trackingEnabled : false;
+            const movementPaused = existingCam ? existingCam.movementPaused : false;
+            const maxSpeedPercent = existingCam ? existingCam.maxSpeedPercent : DEFAULT_MAX_SPEED_PERCENT;
+            const panDeadzonePercent = existingCam ? existingCam.panDeadzonePercent : DEFAULT_PAN_DEADZONE_PERCENT;
+            const tiltDeadzonePercent = existingCam ? existingCam.tiltDeadzonePercent : DEFAULT_TILT_DEADZONE_PERCENT;
+            state.cameras[id] = { ip, rtsp, trackingEnabled, movementPaused, maxSpeedPercent, panDeadzonePercent, tiltDeadzonePercent };
             console.log(`Camera setup updated for ID ${id}: IP=${ip}, RTSP=${rtsp}`);
             initVisca(id, ip);
             ensureTrackerProcess(id, rtsp);

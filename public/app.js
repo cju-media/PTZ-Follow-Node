@@ -16,7 +16,11 @@ class CameraTracker {
 
         this.isTracking = false;
         this.movementPaused = false;
-        this.maxSpeedPercent = 50; // overwritten by setServerMaxSpeed() once the initial 'state' broadcast arrives
+        // All three overwritten by their setServer*() counterparts once the initial 'state'
+        // broadcast arrives - these are just the same defaults server.js falls back to.
+        this.maxSpeedPercent = 50;
+        this.panDeadzonePercent = 12;
+        this.tiltDeadzonePercent = 20;
         this.tracker = null;
         this.src = null;
         this.dst = null;
@@ -42,6 +46,14 @@ class CameraTracker {
                     <label for="speed-${this.camId}">Max Speed: <span id="speed-val-${this.camId}">${this.maxSpeedPercent}</span>% <span title="Caps how fast the camera is allowed to pan/tilt while tracking. Lower this if tracking overshoots/bounces - that's usually feed latency, and a slower cap gives it less speed to overshoot with.">ⓘ</span></label>
                     <input type="range" id="speed-${this.camId}" min="1" max="100" value="${this.maxSpeedPercent}">
                 </div>
+                <div class="speed-control">
+                    <label for="pan-deadzone-${this.camId}">Pan Dead Zone: <span id="pan-deadzone-val-${this.camId}">${this.panDeadzonePercent}</span>% <span title="How close to dead-center still counts as &quot;close enough&quot; - no pan command is sent within this margin. Raise this if the camera keeps overshooting center and bouncing back the other way.">ⓘ</span></label>
+                    <input type="range" id="pan-deadzone-${this.camId}" min="0" max="50" value="${this.panDeadzonePercent}">
+                </div>
+                <div class="speed-control">
+                    <label for="tilt-deadzone-${this.camId}">Tilt Dead Zone: <span id="tilt-deadzone-val-${this.camId}">${this.tiltDeadzonePercent}</span>% <span title="Same idea as Pan Dead Zone, but for tilt. Tilt usually needs a bigger zone than pan - PTZ heads tend to bounce worse on this axis.">ⓘ</span></label>
+                    <input type="range" id="tilt-deadzone-${this.camId}" min="0" max="50" value="${this.tiltDeadzonePercent}">
+                </div>
             </div>
         `;
 
@@ -52,6 +64,10 @@ class CameraTracker {
         this.pauseBtn = document.getElementById(`pause-btn-${this.camId}`);
         this.speedInput = document.getElementById(`speed-${this.camId}`);
         this.speedValLabel = document.getElementById(`speed-val-${this.camId}`);
+        this.panDeadzoneInput = document.getElementById(`pan-deadzone-${this.camId}`);
+        this.panDeadzoneValLabel = document.getElementById(`pan-deadzone-val-${this.camId}`);
+        this.tiltDeadzoneInput = document.getElementById(`tilt-deadzone-${this.camId}`);
+        this.tiltDeadzoneValLabel = document.getElementById(`tilt-deadzone-val-${this.camId}`);
     }
 
     initVideo() {
@@ -141,6 +157,28 @@ class CameraTracker {
             this.maxSpeedPercent = percent;
             if (window.controlWs && window.controlWs.readyState === WebSocket.OPEN) {
                 window.controlWs.send(JSON.stringify({ type: 'set_speed', camId: this.camId, maxSpeedPercent: percent }));
+            }
+        });
+
+        this.panDeadzoneInput.addEventListener('input', () => {
+            this.panDeadzoneValLabel.textContent = this.panDeadzoneInput.value;
+        });
+        this.panDeadzoneInput.addEventListener('change', () => {
+            const percent = parseInt(this.panDeadzoneInput.value, 10);
+            this.panDeadzonePercent = percent;
+            if (window.controlWs && window.controlWs.readyState === WebSocket.OPEN) {
+                window.controlWs.send(JSON.stringify({ type: 'set_deadzone', camId: this.camId, panDeadzonePercent: percent }));
+            }
+        });
+
+        this.tiltDeadzoneInput.addEventListener('input', () => {
+            this.tiltDeadzoneValLabel.textContent = this.tiltDeadzoneInput.value;
+        });
+        this.tiltDeadzoneInput.addEventListener('change', () => {
+            const percent = parseInt(this.tiltDeadzoneInput.value, 10);
+            this.tiltDeadzonePercent = percent;
+            if (window.controlWs && window.controlWs.readyState === WebSocket.OPEN) {
+                window.controlWs.send(JSON.stringify({ type: 'set_deadzone', camId: this.camId, tiltDeadzonePercent: percent }));
             }
         });
     }
@@ -247,6 +285,25 @@ class CameraTracker {
         this.speedInput.value = val;
         this.speedValLabel.textContent = val;
     }
+
+    // Same idea as setServerMaxSpeed(), for the two dead zone sliders. Each axis is guarded
+    // against its own slider independently, so dragging one doesn't get clobbered by a broadcast
+    // that only changed the other.
+    setServerDeadzone(panPercent, tiltPercent) {
+        const panVal = Number.isFinite(panPercent) ? panPercent : 12;
+        this.panDeadzonePercent = panVal;
+        if (document.activeElement !== this.panDeadzoneInput) {
+            this.panDeadzoneInput.value = panVal;
+            this.panDeadzoneValLabel.textContent = panVal;
+        }
+
+        const tiltVal = Number.isFinite(tiltPercent) ? tiltPercent : 20;
+        this.tiltDeadzonePercent = tiltVal;
+        if (document.activeElement !== this.tiltDeadzoneInput) {
+            this.tiltDeadzoneInput.value = tiltVal;
+            this.tiltDeadzoneValLabel.textContent = tiltVal;
+        }
+    }
 }
 
 // Global State
@@ -284,6 +341,7 @@ function syncCameraGrid(cameras) {
         cameraTrackers[id].setServerTrackingState(cameras[id].trackingEnabled);
         cameraTrackers[id].setServerMovementPaused(!!cameras[id].movementPaused);
         cameraTrackers[id].setServerMaxSpeed(cameras[id].maxSpeedPercent);
+        cameraTrackers[id].setServerDeadzone(cameras[id].panDeadzonePercent, cameras[id].tiltDeadzonePercent);
     });
 }
 
