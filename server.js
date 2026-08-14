@@ -121,10 +121,30 @@ const VISCA_RECONNECT_THRESHOLD = 2; // consecutive missed ACKs before auto-recr
 // it at full speed on every large tracking error (e.g. subject jumps to the far side of frame,
 // or stands up suddenly) causes it to overshoot the target and bounce back and forth. Capping
 // well under hardware max gives smoother, more stable tracking at the cost of being slower to
-// catch up on big/sudden movements. Raise these if tracking feels too sluggish; lower them
-// further if it still overshoots.
-const MAX_PAN_SPEED = 12;  // out of a hardware max of 24
-const MAX_TILT_SPEED = 10; // out of a hardware max of 20
+// catch up on big/sudden movements.
+//
+// The cap is expressed as a percentage of these hardware maxes rather than as a fixed speed, and
+// stored per-camera (state.cameras[id].maxSpeedPercent, persisted in config.json - see
+// getCameraSpeedCaps()/saveConfig() below) so it's tunable per camera from the web GUI's "Max
+// Speed" slider without a restart - cameras/lenses/mounts differ enough in how prone they are to
+// overshoot that one global constant doesn't fit all of them. DEFAULT_MAX_SPEED_PERCENT is the
+// fallback for a camera that hasn't had it set yet, chosen to match this file's old fixed
+// defaults (12/24 and 10/20 both being 50%) so existing configs don't jump speed on upgrade.
+const HARDWARE_MAX_PAN_SPEED = 24;
+const HARDWARE_MAX_TILT_SPEED = 20;
+const DEFAULT_MAX_SPEED_PERCENT = 50;
+
+// Resolves a camera's speed-percent setting (clamped 1-100, falling back to the default above)
+// into actual pan/tilt speed caps in hardware units.
+function getCameraSpeedCaps(camId) {
+    const cam = state.cameras[camId];
+    let percent = cam && Number.isFinite(cam.maxSpeedPercent) ? cam.maxSpeedPercent : DEFAULT_MAX_SPEED_PERCENT;
+    percent = Math.min(100, Math.max(1, percent));
+    return {
+        panMax: Math.max(1, Math.round(HARDWARE_MAX_PAN_SPEED * percent / 100)),
+        tiltMax: Math.max(1, Math.round(HARDWARE_MAX_TILT_SPEED * percent / 100))
+    };
+}
 
 // Same class of problem as the dev-mode ffmpeg path above: a bare "python3" in getTrackerCommand()
 // below otherwise just does a PATH lookup, which is fine from an interactive Terminal shell but
@@ -241,7 +261,7 @@ app.ws('/stream', (ws, req) => {
 
 // Store global state
 const state = {
-    cameras: {}, // Format: { id: { ip, rtsp, trackingEnabled: boolean } }
+    cameras: {}, // Format: { id: { ip, rtsp, trackingEnabled: boolean, maxSpeedPercent: number } }
     viscaDevices: {} // Format: { id: Visca Camera instance }
 };
 
@@ -303,12 +323,13 @@ function loadConfig() {
 
 function saveConfig() {
     try {
-        // Only save ip and rtsp, don't persist tracking state
+        // Only save ip, rtsp, and maxSpeedPercent - don't persist tracking state
         const configToSave = {};
         Object.keys(state.cameras).forEach(id => {
             configToSave[id] = {
                 ip: state.cameras[id].ip,
-                rtsp: state.cameras[id].rtsp
+                rtsp: state.cameras[id].rtsp,
+                maxSpeedPercent: state.cameras[id].maxSpeedPercent
             };
         });
         fs.writeFileSync(configPath, JSON.stringify(configToSave, null, 2));
@@ -599,12 +620,13 @@ function ensureTrackerProcess(camId, rtsp) {
                     if (Math.abs(tilt) < 0.1) tilt = 0;
 
                     if (pan !== 0 || tilt !== 0) {
-                        let panSpeed = Math.floor(Math.abs(pan) * MAX_PAN_SPEED);
-                        let tiltSpeed = Math.floor(Math.abs(tilt) * MAX_TILT_SPEED);
+                        const { panMax, tiltMax } = getCameraSpeedCaps(camId);
+                        let panSpeed = Math.floor(Math.abs(pan) * panMax);
+                        let tiltSpeed = Math.floor(Math.abs(tilt) * tiltMax);
 
-                        if (panSpeed > MAX_PAN_SPEED) panSpeed = MAX_PAN_SPEED;
+                        if (panSpeed > panMax) panSpeed = panMax;
                         if (panSpeed < 1 && pan !== 0) panSpeed = 1;
-                        if (tiltSpeed > MAX_TILT_SPEED) tiltSpeed = MAX_TILT_SPEED;
+                        if (tiltSpeed > tiltMax) tiltSpeed = tiltMax;
                         if (tiltSpeed < 1 && tilt !== 0) tiltSpeed = 1;
 
                         let panDir = pan > 0 ? 'right' : (pan < 0 ? 'left' : 'stop');
@@ -776,7 +798,11 @@ app.ws('/control', (ws, req) => {
             if (data.type === 'setup') {
                 const trackingEnabled = state.cameras[data.camId] ? state.cameras[data.camId].trackingEnabled : false;
                 const movementPaused = state.cameras[data.camId] ? state.cameras[data.camId].movementPaused : false;
-                state.cameras[data.camId] = { ip: data.camIp, rtsp: data.camRtsp, trackingEnabled, movementPaused };
+                // Carry forward the existing max-speed setting - this path also handles editing
+                // an existing camera's IP, and losing its tuned speed back to the default every
+                // time would be a nasty surprise.
+                const maxSpeedPercent = state.cameras[data.camId] ? state.cameras[data.camId].maxSpeedPercent : DEFAULT_MAX_SPEED_PERCENT;
+                state.cameras[data.camId] = { ip: data.camIp, rtsp: data.camRtsp, trackingEnabled, movementPaused, maxSpeedPercent };
                 console.log(`UI Setup updated for ID ${data.camId}: IP=${data.camIp}, RTSP=${data.camRtsp}`);
                 initVisca(data.camId, data.camIp);
                 ensureTrackerProcess(data.camId, data.camRtsp);
@@ -845,6 +871,26 @@ app.ws('/control', (ws, req) => {
                         }
                     });
                 }
+            } else if (data.type === 'set_speed') {
+                if (state.cameras[data.camId]) {
+                    let percent = Number(data.maxSpeedPercent);
+                    if (!Number.isFinite(percent)) percent = DEFAULT_MAX_SPEED_PERCENT;
+                    percent = Math.min(100, Math.max(1, Math.round(percent)));
+                    state.cameras[data.camId].maxSpeedPercent = percent;
+                    console.log(`Max speed set via UI for ${data.camId}: ${percent}%`);
+                    saveConfig();
+
+                    // Broadcast state update so every open tab's slider (and any other client
+                    // showing this camera) reflects the new value immediately.
+                    wsInstance.getWss().clients.forEach(client => {
+                        if (client.readyState === 1) {
+                            client.send(JSON.stringify({
+                                type: 'state',
+                                cameras: state.cameras
+                            }));
+                        }
+                    });
+                }
             } else if (data.type === 'remove_camera') {
                 if (state.cameras[data.camId]) {
                     console.log(`Removing camera ${data.camId}`);
@@ -894,6 +940,7 @@ function cameraStatusPayload(id) {
         ip: cam.ip || null,
         trackingEnabled: !!cam.trackingEnabled,
         movementPaused: !!cam.movementPaused,
+        maxSpeedPercent: Number.isFinite(cam.maxSpeedPercent) ? cam.maxSpeedPercent : DEFAULT_MAX_SPEED_PERCENT,
         hasRect: !!cam.rect, // whether a bounding box has ever been drawn - OSC /tracking needs this to start
         trackerRunning: !!activeTrackers[id],
         // Best-effort connection health: VISCA is UDP with no real handshake, so this is really
@@ -1049,7 +1096,8 @@ oscServer.on('message', (msg) => {
             const rtsp = `rtsp://${ip}:554/live/av0`;
             const trackingEnabled = state.cameras[id] ? state.cameras[id].trackingEnabled : false;
             const movementPaused = state.cameras[id] ? state.cameras[id].movementPaused : false;
-            state.cameras[id] = { ip, rtsp, trackingEnabled, movementPaused };
+            const maxSpeedPercent = state.cameras[id] ? state.cameras[id].maxSpeedPercent : DEFAULT_MAX_SPEED_PERCENT;
+            state.cameras[id] = { ip, rtsp, trackingEnabled, movementPaused, maxSpeedPercent };
             console.log(`Camera setup updated for ID ${id}: IP=${ip}, RTSP=${rtsp}`);
             initVisca(id, ip);
             ensureTrackerProcess(id, rtsp);

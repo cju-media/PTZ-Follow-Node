@@ -16,6 +16,7 @@ class CameraTracker {
 
         this.isTracking = false;
         this.movementPaused = false;
+        this.maxSpeedPercent = 50; // overwritten by setServerMaxSpeed() once the initial 'state' broadcast arrives
         this.tracker = null;
         this.src = null;
         this.dst = null;
@@ -37,6 +38,10 @@ class CameraTracker {
                     <button id="track-btn-${this.camId}">Enable Tracking</button>
                     <button id="pause-btn-${this.camId}" disabled>Pause Movement</button>
                 </div>
+                <div class="speed-control">
+                    <label for="speed-${this.camId}">Max Speed: <span id="speed-val-${this.camId}">${this.maxSpeedPercent}</span>% <span title="Caps how fast the camera is allowed to pan/tilt while tracking. Lower this if tracking overshoots/bounces - that's usually feed latency, and a slower cap gives it less speed to overshoot with.">ⓘ</span></label>
+                    <input type="range" id="speed-${this.camId}" min="1" max="100" value="${this.maxSpeedPercent}">
+                </div>
             </div>
         `;
 
@@ -45,6 +50,8 @@ class CameraTracker {
         this.ctx = this.overlayCanvas.getContext('2d');
         this.trackBtn = document.getElementById(`track-btn-${this.camId}`);
         this.pauseBtn = document.getElementById(`pause-btn-${this.camId}`);
+        this.speedInput = document.getElementById(`speed-${this.camId}`);
+        this.speedValLabel = document.getElementById(`speed-val-${this.camId}`);
     }
 
     initVideo() {
@@ -120,6 +127,21 @@ class CameraTracker {
 
         this.pauseBtn.addEventListener('click', () => {
             this.setMovementPaused(!this.movementPaused);
+        });
+
+        // Live label update while dragging, but only push the value to the server (and thus
+        // persist it + affect the VISCA speed the tracker is currently sending) once the user
+        // lets go - sending on every 'input' tick would flood the control socket and saveConfig()
+        // on every intermediate value while dragging.
+        this.speedInput.addEventListener('input', () => {
+            this.speedValLabel.textContent = this.speedInput.value;
+        });
+        this.speedInput.addEventListener('change', () => {
+            const percent = parseInt(this.speedInput.value, 10);
+            this.maxSpeedPercent = percent;
+            if (window.controlWs && window.controlWs.readyState === WebSocket.OPEN) {
+                window.controlWs.send(JSON.stringify({ type: 'set_speed', camId: this.camId, maxSpeedPercent: percent }));
+            }
         });
     }
 
@@ -214,6 +236,17 @@ class CameraTracker {
         this.pauseBtn.textContent = paused ? 'Resume Movement' : 'Pause Movement';
         this.pauseBtn.classList.toggle('paused', paused);
     }
+
+    // Syncs the speed slider to server state - lets another browser tab's edit (or the initial
+    // load) reflect here. Skipped while this slider is the focused element so it doesn't fight a
+    // drag the user is actively mid-way through on THIS tab.
+    setServerMaxSpeed(percent) {
+        const val = Number.isFinite(percent) ? percent : 50;
+        this.maxSpeedPercent = val;
+        if (document.activeElement === this.speedInput) return;
+        this.speedInput.value = val;
+        this.speedValLabel.textContent = val;
+    }
 }
 
 // Global State
@@ -250,6 +283,7 @@ function syncCameraGrid(cameras) {
         // Sync tracking state
         cameraTrackers[id].setServerTrackingState(cameras[id].trackingEnabled);
         cameraTrackers[id].setServerMovementPaused(!!cameras[id].movementPaused);
+        cameraTrackers[id].setServerMaxSpeed(cameras[id].maxSpeedPercent);
     });
 }
 
